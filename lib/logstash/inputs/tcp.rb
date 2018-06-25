@@ -90,9 +90,10 @@ class LogStash::Inputs::Tcp < LogStash::Inputs::Base
   # For input, sets the field `sslsubject` to that of the client certificate.
   config :ssl_verify, :validate => :boolean, :default => true
 
-  config :ssl_cacert, :validate => :path, :obsolete => "This setting is obsolete. Use ssl_extra_chain_certs instead"
+  config :ssl_cacert, :validate => :path, :obsolete => "This setting is obsolete. Use ssl_trusted_client_CA_certs instead"
 
-  # SSL certificate path
+  # SSL certificate path. PEM- or DER-encoded X509 certificates for server authentication.
+  # Any intermediates can be specified using `ssl_extra_chain_certs`
   config :ssl_cert, :validate => :path
 
   # SSL key path
@@ -101,12 +102,17 @@ class LogStash::Inputs::Tcp < LogStash::Inputs::Base
   # SSL key passphrase
   config :ssl_key_passphrase, :validate => :password, :default => nil
 
-  # An Array of extra X509 certificates to be added to the certificate chain.
-  # Useful when the CA chain is not necessary in the system store.
+  # An Array of path names to X509 certificates to be added to the certificate
+  # chain offered to the client in order to complete server certificate trust
+  # validation. Typically you would include any Intermediate CA certificates
+  # here. These are added to the default certificate OpenSSL (not Java)
+  # certificate store.
   config :ssl_extra_chain_certs, :validate => :array, :default => []
 
-  # Instruct the socket to use TCP keep alives. Uses OS defaults for keep alive settings.
-  config :tcp_keep_alive, :validate => :boolean, :default => false
+  # For server mode instances using client certificates (`ssl_verify` is `true`)
+  # this sets the absolute set of CA certificates that sign your client
+  # certificates.
+  config :ssl_trusted_client_CA_certs, :validate => :array, :default => []
 
   HOST_FIELD = "host".freeze
   HOST_IP_FIELD = "[@metadata][ip_address]".freeze
@@ -308,10 +314,11 @@ class LogStash::Inputs::Tcp < LogStash::Inputs::Base
 
     begin
       @ssl_context = OpenSSL::SSL::SSLContext.new
-      @ssl_context.cert = OpenSSL::X509::Certificate.new(File.read(@ssl_cert))
       @ssl_context.key = OpenSSL::PKey::RSA.new(File.read(@ssl_key),@ssl_key_passphrase.value)
+      @ssl_context.cert = OpenSSL::X509::Certificate.new(File.read(@ssl_cert))
+      @ssl_context.extra_chain_cert = load_server_mode_cert_chain
       if @ssl_verify
-        @ssl_context.cert_store  = load_cert_store
+        @ssl_context.cert_store  = load_client_mode_trusted_CAs
         @ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER|OpenSSL::SSL::VERIFY_FAIL_IF_NO_PEER_CERT
       end
     rescue => e
@@ -322,10 +329,15 @@ class LogStash::Inputs::Tcp < LogStash::Inputs::Base
     @ssl_context
   end
 
-  def load_cert_store
+  def load_server_mode_cert_chain
+    res = @ssl_extra_chain_certs.unshift(@ssl_cert).map { |file| OpenSSL::X509::Certificate.new(File.read(file)) }
+    @logger.info("Using the following server certificate and chain", :res => res)
+    res
+  end
+
+  def load_client_mode_trusted_CAs
     cert_store = OpenSSL::X509::Store.new
-    cert_store.set_default_paths
-    @ssl_extra_chain_certs.each do |cert|
+    @ssl_trusted_client_CA_certs.each do |cert|
       cert_store.add_file(cert)
     end
     cert_store
